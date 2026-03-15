@@ -262,7 +262,7 @@ def _cmd_update(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
     print(f"Updated product id {args.id}")
 
 
-def _cmd_quit(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
+def _cmd_quit(conn: sqlite3.Connection) -> None:
     conn.close()
     sys.exit(0)
 
