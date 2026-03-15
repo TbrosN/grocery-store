@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import json
 import re
 import shlex
 import sqlite3
 import sys
-from pathlib import Path
 from typing import Any
 
 from constants import DEFAULT_DB_PATH, initialize_schema_sql
