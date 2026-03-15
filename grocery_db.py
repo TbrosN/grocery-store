@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import re
 import shlex
 import sqlite3
@@ -9,6 +10,7 @@ import sys
 from typing import Any
 
 from constants import DEFAULT_DB_PATH, initialize_schema_sql
+from wholefoods_scraper import WHOLEFOODS_SOURCE, canonicalize_product_url, crawl_product_urls, scrape_product_url
 
 # Strict thresholds from nutrition_rules.txt.
 ADDED_SUGAR_MAX_G = 0.0
@@ -166,6 +168,223 @@ def query_healthy_products(conn: sqlite3.Connection, limit: int = 100) -> list[s
     ).fetchall()
 
 
+def insert_raw_product(
+    conn: sqlite3.Connection,
+    source_store: str,
+    source_url: str,
+    raw_payload: dict[str, Any],
+    scraped_at: str | None = None,
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO raw_products(source_store, source_url, scraped_at, raw_json)
+        VALUES (?, ?, ?, ?)
+        """,
+        (source_store, source_url, scraped_at or now_iso(), json.dumps(raw_payload, separators=(",", ":"))),
+    )
+    return int(cur.lastrowid)
+
+
+def _safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        match = re.search(r"-?\d+(?:\.\d+)?", value)
+        if match:
+            return float(match.group(0))
+    return None
+
+
+def _upsert_nutrition(conn: sqlite3.Connection, product_id: int, nutrition: dict[str, Any]) -> None:
+    conn.execute(
+        """
+        INSERT INTO nutrition(
+            product_id, serving_size_g, calories, protein_g, total_fat_g,
+            saturated_fat_g, trans_fat_g, carbs_g, fiber_g, total_sugars_g,
+            added_sugars_g, sodium_mg
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(product_id) DO UPDATE SET
+            serving_size_g = excluded.serving_size_g,
+            calories = excluded.calories,
+            protein_g = excluded.protein_g,
+            total_fat_g = excluded.total_fat_g,
+            saturated_fat_g = excluded.saturated_fat_g,
+            trans_fat_g = excluded.trans_fat_g,
+            carbs_g = excluded.carbs_g,
+            fiber_g = excluded.fiber_g,
+            total_sugars_g = excluded.total_sugars_g,
+            added_sugars_g = excluded.added_sugars_g,
+            sodium_mg = excluded.sodium_mg
+        """,
+        (
+            product_id,
+            _safe_float(nutrition.get("serving_size_g")),
+            _safe_float(nutrition.get("calories")),
+            _safe_float(nutrition.get("protein_g")),
+            _safe_float(nutrition.get("total_fat_g")),
+            _safe_float(nutrition.get("saturated_fat_g")),
+            _safe_float(nutrition.get("trans_fat_g")),
+            _safe_float(nutrition.get("carbs_g")),
+            _safe_float(nutrition.get("fiber_g")),
+            _safe_float(nutrition.get("total_sugars_g")),
+            _safe_float(nutrition.get("added_sugars_g")),
+            _safe_float(nutrition.get("sodium_mg")),
+        ),
+    )
+
+
+def _replace_product_ingredients(
+    conn: sqlite3.Connection,
+    product_id: int,
+    ingredient_text: str | None,
+    ingredient_cache: dict[str, int],
+) -> int:
+    parsed_ingredients = parse_ingredients(ingredient_text)
+    conn.execute("DELETE FROM product_ingredients WHERE product_id = ?", (product_id,))
+    for index, ingredient in enumerate(parsed_ingredients, start=1):
+        ingredient_id = get_or_create_ingredient_id(conn, ingredient_cache, ingredient)
+        conn.execute(
+            """
+            INSERT INTO product_ingredients(product_id, ingredient_id, position)
+            VALUES (?, ?, ?)
+            ON CONFLICT(product_id, ingredient_id) DO UPDATE SET
+                position = excluded.position
+            """,
+            (product_id, ingredient_id, index),
+        )
+    return len(parsed_ingredients)
+
+
+def _recompute_product_health(conn: sqlite3.Connection, product_id: int, ingredient_count: int) -> None:
+    ingredient_flags = conn.execute(
+        """
+        SELECT
+            COALESCE(MAX(f.is_added_sugar), 0) AS contains_added_sugar,
+            COALESCE(MAX(f.is_artificial_sweetener), 0) AS contains_artificial_sweetener,
+            COALESCE(MAX(f.is_hydrogenated_oil), 0) AS contains_hydrogenated_oil,
+            COALESCE(MAX(f.is_seed_oil), 0) AS contains_seed_oil,
+            COALESCE(MAX(f.is_preservative), 0) AS contains_preservatives,
+            COALESCE(MAX(f.is_junk_additive), 0) AS contains_junk_additives
+        FROM product_ingredients pi
+        LEFT JOIN ingredient_flags f ON pi.ingredient_id = f.ingredient_id
+        WHERE pi.product_id = ?
+        """,
+        (product_id,),
+    ).fetchone()
+
+    nutrition_row = conn.execute(
+        "SELECT added_sugars_g, sodium_mg, trans_fat_g FROM nutrition WHERE product_id = ?",
+        (product_id,),
+    ).fetchone()
+
+    added_sugars_g = float(nutrition_row["added_sugars_g"] or 0.0) if nutrition_row else 0.0
+    sodium_mg = float(nutrition_row["sodium_mg"] or 0.0) if nutrition_row else 0.0
+    trans_fat_g = float(nutrition_row["trans_fat_g"] or 0.0) if nutrition_row else 0.0
+    contains_junk_additives = int(ingredient_flags["contains_junk_additives"] or 0) if ingredient_flags else 0
+
+    conn.execute(
+        """
+        INSERT INTO product_health(
+            product_id,
+            contains_added_sugar,
+            contains_artificial_sweetener,
+            contains_hydrogenated_oil,
+            contains_seed_oil,
+            contains_preservatives,
+            high_added_sugar,
+            high_sodium,
+            high_trans_fat,
+            ultra_processed
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(product_id) DO UPDATE SET
+            contains_added_sugar = excluded.contains_added_sugar,
+            contains_artificial_sweetener = excluded.contains_artificial_sweetener,
+            contains_hydrogenated_oil = excluded.contains_hydrogenated_oil,
+            contains_seed_oil = excluded.contains_seed_oil,
+            contains_preservatives = excluded.contains_preservatives,
+            high_added_sugar = excluded.high_added_sugar,
+            high_sodium = excluded.high_sodium,
+            high_trans_fat = excluded.high_trans_fat,
+            ultra_processed = excluded.ultra_processed
+        """,
+        (
+            product_id,
+            int(ingredient_flags["contains_added_sugar"] or 0) if ingredient_flags else 0,
+            int(ingredient_flags["contains_artificial_sweetener"] or 0) if ingredient_flags else 0,
+            int(ingredient_flags["contains_hydrogenated_oil"] or 0) if ingredient_flags else 0,
+            int(ingredient_flags["contains_seed_oil"] or 0) if ingredient_flags else 0,
+            int(ingredient_flags["contains_preservatives"] or 0) if ingredient_flags else 0,
+            1 if added_sugars_g > ADDED_SUGAR_MAX_G else 0,
+            1 if sodium_mg > SODIUM_MAX_MG else 0,
+            1 if trans_fat_g > TRANS_FAT_MAX_G else 0,
+            1 if ingredient_count > ULTRA_PROCESSED_INGREDIENT_COUNT or contains_junk_additives else 0,
+        ),
+    )
+
+
+def upsert_product_from_raw_payload(
+    conn: sqlite3.Connection,
+    raw_payload: dict[str, Any],
+    ingredient_cache: dict[str, int],
+) -> int | None:
+    extracted = raw_payload.get("extracted") or {}
+    name = extracted.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+
+    brand = extracted.get("brand")
+    category = extracted.get("category")
+    ingredient_text = extracted.get("ingredient_text")
+    organic_flag = int(bool(extracted.get("organic_flag")))
+    created_at = now_iso()
+
+    existing = conn.execute(
+        """
+        SELECT id FROM products
+        WHERE name = ?
+          AND COALESCE(brand, '') = COALESCE(?, '')
+          AND COALESCE(category, '') = COALESCE(?, '')
+        LIMIT 1
+        """,
+        (name.strip(), brand, category),
+    ).fetchone()
+
+    if existing:
+        product_id = int(existing["id"])
+        conn.execute(
+            """
+            UPDATE products
+            SET organic_flag = ?, ingredient_text = ?, ingredient_count = ?
+            WHERE id = ?
+            """,
+            (organic_flag, ingredient_text, 0, product_id),
+        )
+    else:
+        cur = conn.execute(
+            """
+            INSERT INTO products(
+                name, brand, category, organic_flag, ingredient_text, ingredient_count, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (name.strip(), brand, category, organic_flag, ingredient_text, 0, created_at),
+        )
+        product_id = int(cur.lastrowid)
+
+    nutrition = extracted.get("nutrition") if isinstance(extracted.get("nutrition"), dict) else {}
+    _upsert_nutrition(conn, product_id, nutrition)
+    ingredient_count = _replace_product_ingredients(conn, product_id, ingredient_text, ingredient_cache)
+    conn.execute(
+        "UPDATE products SET ingredient_count = ?, ingredient_text = ? WHERE id = ?",
+        (ingredient_count, ingredient_text, product_id),
+    )
+    _recompute_product_health(conn, product_id, ingredient_count)
+    return product_id
+
+
 def _cmd_init(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
     initialize_schema(conn)
     if args.seed_default_flags:
@@ -191,6 +410,114 @@ def _cmd_query_healthy(args: argparse.Namespace, conn: sqlite3.Connection) -> No
         )
 
 
+def _cmd_crawl_wholefoods(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
+    del conn
+    seed_urls = list(args.seed_url or [])
+    if not seed_urls:
+        raise ValueError("crawl-wholefoods requires at least one --seed-url")
+    urls = crawl_product_urls(
+        seed_urls=seed_urls,
+        max_pages=args.max_pages,
+        delay_seconds=args.delay_seconds,
+    )
+    if args.output_file:
+        with open(args.output_file, "w", encoding="utf-8") as fp:
+            for url in urls:
+                fp.write(f"{url}\n")
+    print(f"Discovered {len(urls)} product URLs")
+    for url in urls:
+        print(url)
+
+
+def _cmd_scrape_wholefoods(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
+    product_urls = list(args.product_url or [])
+    if not product_urls:
+        seed_urls = list(args.seed_url or [])
+        if not seed_urls:
+            raise ValueError("scrape-wholefoods requires --product-url or --seed-url")
+        discovered = crawl_product_urls(
+            seed_urls=seed_urls,
+            max_pages=args.max_pages,
+            delay_seconds=args.delay_seconds,
+        )
+        max_products = args.max_products if args.max_products > 0 else len(discovered)
+        product_urls = discovered[:max_products]
+    elif args.max_products > 0:
+        product_urls = product_urls[: args.max_products]
+
+    inserted_count = 0
+    gate_count = 0
+    error_count = 0
+    for raw_url in product_urls:
+        canonical_url = canonicalize_product_url(raw_url) or raw_url
+        payload = scrape_product_url(canonical_url)
+        status = payload.get("fetch_status")
+        if status == "store_gate":
+            gate_count += 1
+        elif status != "ok":
+            error_count += 1
+        insert_raw_product(
+            conn,
+            source_store=WHOLEFOODS_SOURCE,
+            source_url=canonical_url,
+            raw_payload=payload,
+            scraped_at=payload.get("fetched_at"),
+        )
+        inserted_count += 1
+
+    print(
+        f"Scraped {len(product_urls)} URLs | "
+        f"raw inserted={inserted_count}, store_gate={gate_count}, errors={error_count}"
+    )
+
+
+def _cmd_parse_raw(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
+    query = """
+        SELECT id, source_url, raw_json
+        FROM raw_products
+        WHERE source_store = ?
+    """
+    params: list[Any] = [WHOLEFOODS_SOURCE]
+    if args.since_id is not None:
+        query += " AND id > ?"
+        params.append(args.since_id)
+    query += " ORDER BY id ASC"
+    if args.limit is not None:
+        query += " LIMIT ?"
+        params.append(args.limit)
+
+    rows = conn.execute(query, tuple(params)).fetchall()
+    ingredient_cache: dict[str, int] = {}
+    scanned = 0
+    processed = 0
+    skipped = 0
+    for row in rows:
+        scanned += 1
+        try:
+            payload = json.loads(row["raw_json"])
+        except json.JSONDecodeError:
+            skipped += 1
+            continue
+        if payload.get("fetch_status") not in ("ok", "partial"):
+            skipped += 1
+            continue
+        extracted = payload.get("extracted") or {}
+        if not extracted.get("name"):
+            skipped += 1
+            continue
+        if args.dry_run:
+            processed += 1
+            continue
+        product_id = upsert_product_from_raw_payload(conn, payload, ingredient_cache)
+        if product_id is None:
+            skipped += 1
+        else:
+            processed += 1
+
+    mode = "dry-run" if args.dry_run else "write"
+    print(f"parse-raw {mode}: scanned={scanned}, processed={processed}, skipped={skipped}")
+
+
 def insert_product(
     conn: sqlite3.Connection,
     name: str,
@@ -199,13 +526,14 @@ def insert_product(
     **kwargs: Any,
 ) -> int:
     """Insert a new product. Not implemented."""
-    return conn.execute(
+    cur = conn.execute(
         """
         INSERT INTO products(name, brand, category, organic_flag, ingredient_text, ingredient_count, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (name, brand, category, kwargs.get("organic_flag", 0), kwargs.get("ingredient_text", ""), kwargs.get("ingredient_count", 0), now_iso()),
     )
+    return int(cur.lastrowid)
 
 
 def delete_product(conn: sqlite3.Connection, product_id: int) -> None:
@@ -262,7 +590,8 @@ def _cmd_update(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
     print(f"Updated product id {args.id}")
 
 
-def _cmd_quit(conn: sqlite3.Connection) -> None:
+def _cmd_quit(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
+    del args
     conn.close()
     sys.exit(0)
 
@@ -299,6 +628,52 @@ def build_cli() -> argparse.ArgumentParser:
     update_parser.add_argument("--brand", default=None, help="New brand")
     update_parser.add_argument("--category", default=None, help="New category")
     update_parser.set_defaults(func=_cmd_update)
+
+    crawl_parser = sub.add_parser("crawl-wholefoods", help="Discover Whole Foods product URLs")
+    crawl_parser.add_argument(
+        "--seed-url",
+        action="append",
+        default=[],
+        help="Whole Foods aisle/search URL to crawl (can repeat)",
+    )
+    crawl_parser.add_argument("--max-pages", type=int, default=25, help="Max discovery pages to crawl")
+    crawl_parser.add_argument(
+        "--delay-seconds",
+        type=float,
+        default=0.35,
+        help="Delay between discovery page requests",
+    )
+    crawl_parser.add_argument("--output-file", default=None, help="Optional file to write discovered URLs")
+    crawl_parser.set_defaults(func=_cmd_crawl_wholefoods)
+
+    scrape_parser = sub.add_parser("scrape-wholefoods", help="Scrape Whole Foods product pages into raw_products")
+    scrape_parser.add_argument(
+        "--product-url",
+        action="append",
+        default=[],
+        help="Product detail URL to scrape (can repeat)",
+    )
+    scrape_parser.add_argument(
+        "--seed-url",
+        action="append",
+        default=[],
+        help="If product URLs are omitted, crawl these URLs for discovery",
+    )
+    scrape_parser.add_argument("--max-pages", type=int, default=25, help="Max discovery pages to crawl")
+    scrape_parser.add_argument(
+        "--delay-seconds",
+        type=float,
+        default=0.35,
+        help="Delay between HTTP requests for crawling",
+    )
+    scrape_parser.add_argument("--max-products", type=int, default=50, help="Max products to scrape")
+    scrape_parser.set_defaults(func=_cmd_scrape_wholefoods)
+
+    parse_raw_parser = sub.add_parser("parse-raw", help="Parse raw_products rows into normalized tables")
+    parse_raw_parser.add_argument("--since-id", type=int, default=None, help="Only parse raw rows with id > since-id")
+    parse_raw_parser.add_argument("--limit", type=int, default=250, help="Max raw rows to parse")
+    parse_raw_parser.add_argument("--dry-run", action="store_true", help="Parse and validate without writing updates")
+    parse_raw_parser.set_defaults(func=_cmd_parse_raw)
 
     # Setup / maintenance
     init_parser = sub.add_parser("init", help="Create database schema (optional: seed flags)")

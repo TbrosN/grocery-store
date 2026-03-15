@@ -89,4 +89,9 @@ initialize_schema_sql = """
         high_added_sugar,
         high_sodium
     );
+    CREATE INDEX IF NOT EXISTS idx_raw_products_source_url_time ON raw_products(
+        source_store,
+        source_url,
+        scraped_at
+    );
     """
