@@ -111,8 +111,8 @@ Below are the main tables and key columns in the Grocery Store DB SQLite databas
 
 ## Usage
 - Make and activate a virtual envrionment
+- Install python dependencies: `pip install -r requirements.txt`
 - Install browser scraper dependency once:
-  - `pip install playwright`
   - `python -m playwright install chromium`
 - Initialize DB schema: `python grocery_db.py init --seed-default-flags`
 - Run the CLI: `python grocery_db.py`
