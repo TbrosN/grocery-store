@@ -1,0 +1,42 @@
+[
+  {
+    "name": "Plain Rolled Oats",
+    "brand": "Simple Mill",
+    "category": "Breakfast",
+    "organic_flag": true,
+    "ingredient_text": "Organic whole grain oats",
+    "nutrition": {
+      "serving_size_g": 40,
+      "calories": 150,
+      "protein_g": 5,
+      "total_fat_g": 3,
+      "saturated_fat_g": 0.5,
+      "trans_fat_g": 0,
+      "carbs_g": 27,
+      "fiber_g": 4,
+      "total_sugars_g": 1,
+      "added_sugars_g": 0,
+      "sodium_mg": 0
+    }
+  },
+  {
+    "name": "Frosted Cereal Bites",
+    "brand": "Crunch Co",
+    "category": "Breakfast",
+    "organic_flag": false,
+    "ingredient_text": "Whole grain corn flour, sugar, high-fructose corn syrup, corn oil, Red 40, salt",
+    "nutrition": {
+      "serving_size_g": 38,
+      "calories": 170,
+      "protein_g": 2,
+      "total_fat_g": 4,
+      "saturated_fat_g": 0,
+      "trans_fat_g": 0,
+      "carbs_g": 33,
+      "fiber_g": 1,
+      "total_sugars_g": 14,
+      "added_sugars_g": 13,
+      "sodium_mg": 520
+    }
+  }
+]
