@@ -1,0 +1,23 @@
+I used ChatGPT/Gemini web at the start to flesh out ideas for the database schema. Then, I used Cursor to help implement the
+code for the app.
+
+I want to create a sqlite database to store grocery store items. This will primarily be focused on food, (though I'm considering supporting other products like lotions and soaps in the future). In particular, I want to store ingredients and nutrition facts in some way that will let me effectively query for healthy things: things without ingredients X,Y,Z, or with 0g added sugars, etc. The goal will be to import/scrape data from actual grocery stores, and be able to do these types of queries to find the items that im interested in eating/drinking. I'm wondering what the best way to store this is. My current ideas so far:
+- I'm thinking a column store would be ideal for these types of queries, does sqlite have good support OLAP workloads like this? If not, is there a better alternative that is still super easy to use locally?
+- We need to somehow store ingredients and individual nutrition facts in a queryable way, perhaps separate columns for each item? Nutrition facts are luckily pretty standardized, so columns seem reasonable. But ingredients can be quite broad; one observation is that for health reasons, there are certain "good" and "bad" ingredients to look for, and it might be sufficient to focus on those. Or, we can try to think of ways to store all ingredients, but still have it be queryable/analyzable.
+- It might be nice to also store where to find these items, i.e. store names or websites
+In addition to the questions I asked above, consider things I might have missed-- columns we should probably include, possible future extensions and how our design decisions now might impact them, things I'm overlooking in my current ideas. Some of my ideas may need revising/removing!
+
+these are great ideas! We should definitely store raw scraped data in case we want to reprocess. This is quite complex, and I think we need to narrow the scope a bit and focus on just the things that really matter when we are searching for healthy products. I attached an image that summarizes what a healthy diet should look like; pay special attention to the ingredients that are in/near the trash can. Also, another consideration that may potentially be relevant for us: in terms of healthiness, food products are VERY high noise; about 90% or so of food products will instantly/clearly land in the trash can due to their ingredients/nutrition facts. Our primarily goal is to filter these out, and we are okay with a small amount of false-positives, but we dont want false-negatives (dont remove the healthy foods!). Also, let's track things like whether the product is organic.
+
+(At this point, I switched to Gemini web to do some research on top ingredients to avoid.)
+
+Consider the nutrition guide attached. Using this and external research on reliable sources (e.g., Cleveland Clinic), please compile a ranked list of the top ingredients to avoid. These should be ingredients that, if seen in a product, immediately rule it out as a healthy option. Consider ingredients that have known health risks or links, including but not limited to cancer, diabetes, high blood pressure, etc. The nutrition guide is quite well-researched and should give you a great starting point/base.
+
+Amazing, these are great. Please output a list of concrete ingredients that cover all of these, separated by commas. Output no other text.
+
+I noticed that "gums" are also in the trash can in the nutrition diagram. What are those referring to, and can you please output a new list including any ingredients relevant to that restriction?
+
+Amazing! Now similarly, what are the top nutrition facts rules? These should be relatively simple and mapping well onto the health diagram, e.g. sugar is in the trash, so added_sugars > 0 would be bad. Trans fats > 0 is also bad. Rice, pasta, bread, red meat, organ meat are under "sometimes for some people", i dont know 100% why but I believe this has to do with glycemic index and saturated fat/cholesterol. These are also things to track, research reasonable guidelines to get strict thresholds for these. Consider other nutrition facts too that are indicative of "junk food".
+
+yes, please make a very concise cheat sheet listing these rules and whether they place things into "sometimes for some people" or "avoid like the plague". Note that in these rules, we should strive to be as strict as the food guide. Any added sugars are really bad, for instance
+
