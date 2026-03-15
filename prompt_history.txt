@@ -388,3 +388,5 @@ rather than one-command-and-stop, can we make this cli tool a loop? So that afte
 hmm when I run query-healthy it just says `grocery_db.py: error: unrecognized arguments: --db grocery.db`
 
 ah, im getting `sqlite3.OperationalError: cannot start a transaction within a transaction`, I think we need to just commit things as we go. i.e., we commit right after an operation.
+
+(I added implementations for the insert, delete, and update commands for the products table)

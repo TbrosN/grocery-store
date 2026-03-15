@@ -149,158 +149,6 @@ def seed_ingredient_flags(
         )
 
 
-def _collect_ingredient_signal_flags(
-    conn: sqlite3.Connection, product_id: int
-) -> dict[str, int]:
-    row = conn.execute(
-        """
-        SELECT
-            COALESCE(MAX(f.is_added_sugar), 0) AS contains_added_sugar,
-            COALESCE(MAX(f.is_artificial_sweetener), 0) AS contains_artificial_sweetener,
-            COALESCE(MAX(f.is_hydrogenated_oil), 0) AS contains_hydrogenated_oil,
-            COALESCE(MAX(f.is_seed_oil), 0) AS contains_seed_oil,
-            COALESCE(MAX(f.is_preservative), 0) AS contains_preservatives,
-            COALESCE(MAX(f.is_junk_additive), 0) AS contains_junk_additive
-        FROM product_ingredients pi
-        LEFT JOIN ingredient_flags f ON pi.ingredient_id = f.ingredient_id
-        WHERE pi.product_id = ?
-        """,
-        (product_id,),
-    ).fetchone()
-    assert row is not None
-    return {key: int(row[key]) for key in row.keys()}
-
-
-def _compute_health_flags(
-    ingredient_signals: dict[str, int],
-    ingredient_count: int,
-    nutrition: dict[str, Any],
-) -> dict[str, int]:
-    added_sugars = float(nutrition.get("added_sugars_g") or 0.0)
-    sodium_mg = float(nutrition.get("sodium_mg") or 0.0)
-    trans_fat = float(nutrition.get("trans_fat_g") or 0.0)
-
-    high_added_sugar = int(added_sugars > ADDED_SUGAR_MAX_G)
-    high_sodium = int(sodium_mg > SODIUM_MAX_MG)
-    high_trans_fat = int(trans_fat > TRANS_FAT_MAX_G)
-    ultra_processed = int(
-        ingredient_count > ULTRA_PROCESSED_INGREDIENT_COUNT
-        or ingredient_signals["contains_junk_additive"] == 1
-    )
-
-    return {
-        "contains_added_sugar": ingredient_signals["contains_added_sugar"],
-        "contains_artificial_sweetener": ingredient_signals[
-            "contains_artificial_sweetener"
-        ],
-        "contains_hydrogenated_oil": ingredient_signals["contains_hydrogenated_oil"],
-        "contains_seed_oil": ingredient_signals["contains_seed_oil"],
-        "contains_preservatives": ingredient_signals["contains_preservatives"],
-        "high_added_sugar": high_added_sugar,
-        "high_sodium": high_sodium,
-        "high_trans_fat": high_trans_fat,
-        "ultra_processed": ultra_processed,
-    }
-
-
-def ingest_product(
-    conn: sqlite3.Connection,
-    payload: dict[str, Any],
-    source_store: str | None = None,
-    source_url: str | None = None,
-    ingredient_cache: dict[str, int] | None = None,
-) -> int:
-    cache = ingredient_cache if ingredient_cache is not None else {}
-
-    ingredient_text = str(payload.get("ingredient_text") or "")
-    parsed_ingredients = parse_ingredients(ingredient_text)
-    nutrition = dict(payload.get("nutrition") or {})
-
-    conn.execute(
-        """
-        INSERT INTO raw_products(source_store, source_url, scraped_at, raw_json)
-        VALUES (?, ?, ?, ?)
-        """,
-        (source_store, source_url, now_iso(), json.dumps(payload)),
-    )
-    cur = conn.execute(
-        """
-        INSERT INTO products(name, brand, category, organic_flag, ingredient_text, ingredient_count, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            str(payload["name"]),
-            payload.get("brand"),
-            payload.get("category"),
-            int(bool(payload.get("organic_flag", False))),
-            ingredient_text,
-            len(parsed_ingredients),
-            now_iso(),
-        ),
-    )
-    product_id = int(cur.lastrowid)
-
-    conn.execute(
-        """
-        INSERT INTO nutrition(
-            product_id, serving_size_g, calories, protein_g, total_fat_g, saturated_fat_g,
-            trans_fat_g, carbs_g, fiber_g, total_sugars_g, added_sugars_g, sodium_mg
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            product_id,
-            nutrition.get("serving_size_g"),
-            nutrition.get("calories"),
-            nutrition.get("protein_g"),
-            nutrition.get("total_fat_g"),
-            nutrition.get("saturated_fat_g"),
-            nutrition.get("trans_fat_g"),
-            nutrition.get("carbs_g"),
-            nutrition.get("fiber_g"),
-            nutrition.get("total_sugars_g"),
-            nutrition.get("added_sugars_g"),
-            nutrition.get("sodium_mg"),
-        ),
-    )
-
-    for index, canonical_name in enumerate(parsed_ingredients):
-        ingredient_id = get_or_create_ingredient_id(conn, cache, canonical_name)
-        conn.execute(
-            """
-            INSERT INTO product_ingredients(product_id, ingredient_id, position)
-            VALUES (?, ?, ?)
-            ON CONFLICT(product_id, ingredient_id)
-            DO UPDATE SET position = excluded.position
-            """,
-            (product_id, ingredient_id, index),
-        )
-
-    ingredient_signals = _collect_ingredient_signal_flags(conn, product_id)
-    flags = _compute_health_flags(ingredient_signals, len(parsed_ingredients), nutrition)
-    conn.execute(
-        """
-        INSERT INTO product_health(
-            product_id, contains_added_sugar, contains_artificial_sweetener,
-            contains_hydrogenated_oil, contains_seed_oil, contains_preservatives,
-            high_added_sugar, high_sodium, high_trans_fat, ultra_processed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            product_id,
-            flags["contains_added_sugar"],
-            flags["contains_artificial_sweetener"],
-            flags["contains_hydrogenated_oil"],
-            flags["contains_seed_oil"],
-            flags["contains_preservatives"],
-            flags["high_added_sugar"],
-            flags["high_sodium"],
-            flags["high_trans_fat"],
-            flags["ultra_processed"],
-        ),
-    )
-    return product_id
-
-
 def query_healthy_products(conn: sqlite3.Connection, limit: int = 100) -> list[sqlite3.Row]:
     return conn.execute(
         """
@@ -335,31 +183,6 @@ def _cmd_seed_flags(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
     print(f"Seeded ingredient flags: {args.db}")
 
 
-def _cmd_ingest_json(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
-    path = Path(args.file)
-    data = json.loads(path.read_text())
-    if isinstance(data, dict):
-        products = [data]
-    elif isinstance(data, list):
-        products = data
-    else:
-        raise ValueError("JSON file must be an object or array of objects")
-
-    initialize_schema(conn)
-    with conn:
-        seed_ingredient_flags(conn)
-    cache: dict[str, int] = {}
-    for payload in products:
-        ingest_product(
-            conn,
-            payload=payload,
-            source_store=args.source_store,
-            source_url=args.source_url,
-            ingredient_cache=cache,
-        )
-    print(f"Ingested {len(products)} product(s)")
-
-
 def _cmd_query_healthy(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
     rows = query_healthy_products(conn, limit=args.limit)
     for row in rows:
@@ -378,21 +201,41 @@ def insert_product(
     **kwargs: Any,
 ) -> int:
     """Insert a new product. Not implemented."""
-    raise NotImplementedError("insert_product not implemented")
+    return conn.execute(
+        """
+        INSERT INTO products(name, brand, category, organic_flag, ingredient_text, ingredient_count, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (name, brand, category, kwargs.get("organic_flag", 0), kwargs.get("ingredient_text", ""), kwargs.get("ingredient_count", 0), now_iso()),
+    )
 
 
 def delete_product(conn: sqlite3.Connection, product_id: int) -> None:
     """Delete a product by id. Not implemented."""
-    raise NotImplementedError("delete_product not implemented")
+    return conn.execute(
+        """
+        DELETE FROM products WHERE id = ?
+        """,
+        (product_id,),
+    )
 
 
 def update_product(
     conn: sqlite3.Connection,
     product_id: int,
+    name: str,
+    brand: str | None = None,
+    category: str | None = None,
     **kwargs: Any,
 ) -> None:
     """Update an existing product. Not implemented."""
-    raise NotImplementedError("update_product not implemented")
+    return conn.execute(
+        """
+        UPDATE products SET name = ?, brand = ?, category = ?, organic_flag = ?, ingredient_text = ?, ingredient_count = ?
+        WHERE id = ?
+        """,
+        (name, brand, category, kwargs.get("organic_flag", 0), kwargs.get("ingredient_text", ""), kwargs.get("ingredient_count", 0), product_id),
+    )
 
 
 def _cmd_insert(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
@@ -470,12 +313,6 @@ def build_cli() -> argparse.ArgumentParser:
 
     seed_flags_parser = sub.add_parser("seed-flags", help="Seed ingredient flags")
     seed_flags_parser.set_defaults(func=_cmd_seed_flags)
-
-    ingest_parser = sub.add_parser("ingest-json", help="Ingest product(s) from a JSON file")
-    ingest_parser.add_argument("--file", required=True, help="Path to JSON payload")
-    ingest_parser.add_argument("--source-store", default=None, help="Store name")
-    ingest_parser.add_argument("--source-url", default=None, help="Source URL")
-    ingest_parser.set_defaults(func=_cmd_ingest_json)
 
     quit_parser = sub.add_parser("quit", help="Exit and choose to commit or discard changes")
     quit_parser.set_defaults(func=_cmd_quit)
