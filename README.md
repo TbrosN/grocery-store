@@ -1,6 +1,6 @@
 # Grocery Store DB
 
-This app is a CLI tool that stores grocery store products and their nutrition information in a sqlite db. The user can perform CRUD operations on the products table, and query the products table for healthy products. They can also provide urls from Whole Foods to scrape and insert into the db.
+A CLI tool that stores grocery products and their nutrition information in a SQLite database. Product data is sourced from the [USDA FoodData Central API](https://fdc.nal.usda.gov/). Users can import products by search query, perform CRUD operations, and query for healthy products.
 
 ## Database Schema
 
@@ -8,7 +8,7 @@ Below are the main tables and key columns in the Grocery Store DB SQLite databas
 
 ---
 
-### **raw_products** (stores web-scraped product data)
+### **raw_products** (stores raw API response data)
 | Column         | Data Type    | Constraints       |
 |:-------------- |:------------|:------------------|
 | id             | INTEGER     | PRIMARY KEY       |
@@ -109,17 +109,29 @@ Below are the main tables and key columns in the Grocery Store DB SQLite databas
 - `idx_health_filter` on product_health(contains_added_sugar, contains_artificial_sweetener, contains_hydrogenated_oil, high_added_sugar, high_sodium)
 - `idx_raw_products_source_url_time` on raw_products(source_store, source_url, scraped_at)
 
-## Usage
-- Make and activate a virtual envrionment
-- Install python dependencies: `pip install -r requirements.txt`
-- Install browser scraper dependency once:
-  - `python -m playwright install chromium`
-- Initialize DB schema: `python grocery_db.py init --seed-default-flags`
-- Run the CLI: `python grocery_db.py`
-- In the CLI, run `help` to see the available commands.
+## Setup
+- Create and activate a virtual environment
+- Install dependencies: `pip install -r requirements.txt`
+- Add your USDA API key to `.env`:
+  ```
+  USDA_API_KEY=your_key_here
+  ```
+  Get a free key at [https://fdc.nal.usda.gov/api-key-signup.html](https://fdc.nal.usda.gov/api-key-signup.html)
+- Initialize the DB schema: `python grocery_db.py init --seed-default-flags`
+- Run the interactive CLI: `python grocery_db.py`
+- Type `help` to see all available commands.
+
+## USDA Import
+
+Import products from the USDA FoodData Central API by search query. Can be run directly (not just via the interactive CLI).
+
+```bash
+python grocery_db.py usda-import --query "organic yogurt" --max-results 50
+python grocery_db.py usda-import --query "almond butter" --query "peanut butter" --max-results 100
+```
 
 ## CRUD Operations
-All the operations below are to be performed in the cli (after running `python grocery_db.py`).
+All operations below are run inside the interactive CLI (`python grocery_db.py`).
 
 ### Insert a product
 `insert --name "Product Name" --brand "Brand Name" --category "Category Name"`
@@ -132,8 +144,3 @@ All the operations below are to be performed in the cli (after running `python g
 
 ### Query healthy products
 `query-healthy --limit <number of products to show>`
-
-### Scrape Whole Foods
-- Scrape a product detail page: `scrape-wholefoods --product-url <url>`
-- Crawl pages starting from a seed page (no db updates): `crawl-wholefoods --seed-url <url> --max-pages <number>`
-- Crawl pages and scrape into the db: `scrape-wholefoods --seed-url <url> --max-pages <number> --max-products <number>`

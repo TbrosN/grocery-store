@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import re
 import shlex
 import sqlite3
@@ -10,7 +11,7 @@ import sys
 from typing import Any
 
 from constants import DEFAULT_DB_PATH, initialize_schema_sql
-from wholefoods_scraper import WHOLEFOODS_SOURCE, canonicalize_product_url, crawl_product_urls, scrape_product_url
+from usda_client import USDA_SOURCE, build_raw_payload, search_foods
 
 # Strict thresholds from nutrition_rules.txt.
 ADDED_SUGAR_MAX_G = 0.0
@@ -410,112 +411,74 @@ def _cmd_query_healthy(args: argparse.Namespace, conn: sqlite3.Connection) -> No
         )
 
 
-def _cmd_crawl_wholefoods(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
-    del conn
-    seed_urls = list(args.seed_url or [])
-    if not seed_urls:
-        raise ValueError("crawl-wholefoods requires at least one --seed-url")
-    urls = crawl_product_urls(
-        seed_urls=seed_urls,
-        max_pages=args.max_pages,
-        delay_seconds=args.delay_seconds,
-    )
-    if args.output_file:
-        with open(args.output_file, "w", encoding="utf-8") as fp:
-            for url in urls:
-                fp.write(f"{url}\n")
-    print(f"Discovered {len(urls)} product URLs")
-    for url in urls:
-        print(url)
+def _load_dotenv(path: str = ".env") -> None:
+    """Load KEY=VALUE pairs from a .env file into os.environ (no-op if missing)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except FileNotFoundError:
+        pass
 
 
-def _cmd_scrape_wholefoods(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
-    product_urls = list(args.product_url or [])
-    if not product_urls:
-        seed_urls = list(args.seed_url or [])
-        if not seed_urls:
-            raise ValueError("scrape-wholefoods requires --product-url or --seed-url")
-        discovered = crawl_product_urls(
-            seed_urls=seed_urls,
-            max_pages=args.max_pages,
-            delay_seconds=args.delay_seconds,
-        )
-        max_products = args.max_products if args.max_products > 0 else len(discovered)
-        product_urls = discovered[:max_products]
-    elif args.max_products > 0:
-        product_urls = product_urls[: args.max_products]
+def _cmd_usda_import(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
+    _load_dotenv()
 
-    inserted_count = 0
-    gate_count = 0
-    error_count = 0
-    for raw_url in product_urls:
-        canonical_url = canonicalize_product_url(raw_url) or raw_url
-        payload = scrape_product_url(canonical_url)
-        status = payload.get("fetch_status")
-        if status == "store_gate":
-            gate_count += 1
-        elif status != "ok":
-            error_count += 1
-        insert_raw_product(
-            conn,
-            source_store=WHOLEFOODS_SOURCE,
-            source_url=canonical_url,
-            raw_payload=payload,
-            scraped_at=payload.get("fetched_at"),
-        )
-        inserted_count += 1
+    queries = list(args.query or [])
+    if not queries:
+        raise ValueError("usda-import requires at least one --query")
 
-    print(
-        f"Scraped {len(product_urls)} URLs | "
-        f"raw inserted={inserted_count}, store_gate={gate_count}, errors={error_count}"
-    )
-
-
-def _cmd_parse_raw(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
-    query = """
-        SELECT id, source_url, raw_json
-        FROM raw_products
-        WHERE source_store = ?
-    """
-    params: list[Any] = [WHOLEFOODS_SOURCE]
-    if args.since_id is not None:
-        query += " AND id > ?"
-        params.append(args.since_id)
-    query += " ORDER BY id ASC"
-    if args.limit is not None:
-        query += " LIMIT ?"
-        params.append(args.limit)
-
-    rows = conn.execute(query, tuple(params)).fetchall()
     ingredient_cache: dict[str, int] = {}
-    scanned = 0
-    processed = 0
-    skipped = 0
-    for row in rows:
-        scanned += 1
-        try:
-            payload = json.loads(row["raw_json"])
-        except json.JSONDecodeError:
-            skipped += 1
-            continue
-        if payload.get("fetch_status") not in ("ok", "partial"):
-            skipped += 1
-            continue
-        extracted = payload.get("extracted") or {}
-        if not extracted.get("name"):
-            skipped += 1
-            continue
-        if args.dry_run:
-            processed += 1
-            continue
-        product_id = upsert_product_from_raw_payload(conn, payload, ingredient_cache)
-        if product_id is None:
-            skipped += 1
-        else:
-            processed += 1
+    total_inserted = 0
+    total_skipped = 0
 
-    mode = "dry-run" if args.dry_run else "write"
-    print(f"parse-raw {mode}: scanned={scanned}, processed={processed}, skipped={skipped}")
+    for query_str in queries:
+        remaining = args.max_results
+        page = 1
+        while remaining > 0:
+            page_size = min(remaining, 200)
+            try:
+                result = search_foods(query_str, page_size=page_size, page_number=page)
+            except RuntimeError as exc:
+                print(f"[ERROR] {exc}")
+                break
+
+            foods = result.get("foods") or []
+            if not foods:
+                break
+
+            for food in foods:
+                raw_payload = build_raw_payload(food)
+                source_url = raw_payload["source_url"]
+                insert_raw_product(
+                    conn,
+                    source_store=USDA_SOURCE,
+                    source_url=source_url,
+                    raw_payload=raw_payload,
+                )
+                if raw_payload["fetch_status"] in ("ok", "partial"):
+                    product_id = upsert_product_from_raw_payload(conn, raw_payload, ingredient_cache)
+                    if product_id is not None:
+                        total_inserted += 1
+                    else:
+                        total_skipped += 1
+                else:
+                    total_skipped += 1
+
+            remaining -= len(foods)
+            total_pages = result.get("totalPages") or 1
+            if page >= total_pages:
+                break
+            page += 1
+
+    print(f"usda-import: inserted={total_inserted}, skipped={total_skipped}")
 
 
 def insert_product(
@@ -629,51 +592,24 @@ def build_cli() -> argparse.ArgumentParser:
     update_parser.add_argument("--category", default=None, help="New category")
     update_parser.set_defaults(func=_cmd_update)
 
-    crawl_parser = sub.add_parser("crawl-wholefoods", help="Discover Whole Foods product URLs")
-    crawl_parser.add_argument(
-        "--seed-url",
+    usda_import_parser = sub.add_parser(
+        "usda-import",
+        help="Search USDA FoodData Central and import results into the database",
+    )
+    usda_import_parser.add_argument(
+        "--query",
         action="append",
         default=[],
-        help="Whole Foods aisle/search URL to crawl (can repeat)",
+        required=True,
+        help="Search term to query (can repeat for multiple queries)",
     )
-    crawl_parser.add_argument("--max-pages", type=int, default=25, help="Max discovery pages to crawl")
-    crawl_parser.add_argument(
-        "--delay-seconds",
-        type=float,
-        default=0.35,
-        help="Delay between discovery page requests",
+    usda_import_parser.add_argument(
+        "--max-results",
+        type=int,
+        default=10,
+        help="Max foods to import per query (default: 10)",
     )
-    crawl_parser.add_argument("--output-file", default=None, help="Optional file to write discovered URLs")
-    crawl_parser.set_defaults(func=_cmd_crawl_wholefoods)
-
-    scrape_parser = sub.add_parser("scrape-wholefoods", help="Scrape Whole Foods product pages into raw_products")
-    scrape_parser.add_argument(
-        "--product-url",
-        action="append",
-        default=[],
-        help="Product detail URL to scrape (can repeat)",
-    )
-    scrape_parser.add_argument(
-        "--seed-url",
-        action="append",
-        default=[],
-        help="If product URLs are omitted, crawl these URLs for discovery",
-    )
-    scrape_parser.add_argument("--max-pages", type=int, default=25, help="Max discovery pages to crawl")
-    scrape_parser.add_argument(
-        "--delay-seconds",
-        type=float,
-        default=0.35,
-        help="Delay between HTTP requests for crawling",
-    )
-    scrape_parser.add_argument("--max-products", type=int, default=50, help="Max products to scrape")
-    scrape_parser.set_defaults(func=_cmd_scrape_wholefoods)
-
-    parse_raw_parser = sub.add_parser("parse-raw", help="Parse raw_products rows into normalized tables")
-    parse_raw_parser.add_argument("--since-id", type=int, default=None, help="Only parse raw rows with id > since-id")
-    parse_raw_parser.add_argument("--limit", type=int, default=250, help="Max raw rows to parse")
-    parse_raw_parser.add_argument("--dry-run", action="store_true", help="Parse and validate without writing updates")
-    parse_raw_parser.set_defaults(func=_cmd_parse_raw)
+    usda_import_parser.set_defaults(func=_cmd_usda_import)
 
     # Setup / maintenance
     init_parser = sub.add_parser("init", help="Create database schema (optional: seed flags)")

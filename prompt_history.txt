@@ -438,3 +438,63 @@ HTTP for discovery + raw queueing
 Playwright for PDP detail extraction (at least as fallback for store_gate rows, likely primary for now)
 ```
 Please implement the changes for this.
+
+getting this error:
+```
+scrape-wholefoods --product-url https://www.wholefoodsmarket.com/365-Everyday-Value-Organic-Tortillas/dp/B07FWNFTJK?pd_rd_w=Z92ht&content-id=amzn1.sym.e3bf0c38-07bb-437c-a078-90549ca755f6&pf_rd_p=1e00dde6-7b7a-457f-8a8b-81fdf1e27aae&pf_rd_r=8PHDB389QHJE9FXE2W3P&pd_rd_wg=VVEE7&pd_rd_r=31aae73e-0daf-4e86-a905-9a8719d98df3&pd_rd_i=B07FWNFTJK&fpw=alm&almBrandId=VUZHIFdob2xlIEZvb2Rz&ref_=pd_alm_wf_dsk_cp_wf_merch_WF21586_sg_1_2_t
+Traceback (most recent call last):
+  File "/Users/treybrosnan/Projects/15113/grocery-store/grocery_db.py", line 742, in <module>
+    main()
+    ~~~~^^
+  File "/Users/treybrosnan/Projects/15113/grocery-store/grocery_db.py", line 730, in main
+    _run_interactive_loop(parser, args.db)
+    ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/Users/treybrosnan/Projects/15113/grocery-store/grocery_db.py", line 718, in _run_interactive_loop
+    parsed.func(parsed, conn)
+    ~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "/Users/treybrosnan/Projects/15113/grocery-store/grocery_db.py", line 453, in _cmd_scrape_wholefoods
+    payload = scrape_product_url(canonical_url)
+  File "/Users/treybrosnan/Projects/15113/grocery-store/wholefoods_scraper.py", line 453, in scrape_product_url
+    browser_result = browser_fetch(canonical_url)
+  File "/Users/treybrosnan/Projects/15113/grocery-store/wholefoods_scraper.py", line 205, in fetch_html_playwright
+    context.close()
+    ~~~~~~~~~~~~~^^
+  File "/Users/treybrosnan/Projects/15113/grocery-store/.venv/lib/python3.14/site-packages/playwright/sync_api/_generated.py", line 13552, in close
+    return mapping.from_maybe_impl(self._sync(self._impl_obj.close(reason=reason)))
+                                   ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/treybrosnan/Projects/15113/grocery-store/.venv/lib/python3.14/site-packages/playwright/_impl/_sync_base.py", line 104, in _sync
+    raise Error("Event loop is closed! Is Playwright already stopped?")
+playwright._impl._errors.Error: Event loop is closed! Is Playwright already stopped?
+```
+
+this is giving some kind of error, but still inserting into raw_products and not printing any errors back to the user:
+raw_json is
+```
+{"source_store":"whole_foods","source_url":"https://www.wholefoodsmarket.com/365-everyday-value-organic-tortillas/dp/B07FWNFTJK","fetched_at":"2026-03-15T23:38:51+00:00","fetch_status":"ok","http_status":200,"error":null,"extracted":{"name":"Oops!","brand":null,"category":null,"organic_flag":0,"ingredient_text":null,"nutrition":{}},"final_url":"https://www.wholefoodsmarket.com/365-everyday-value-organic-tortillas/dp/B07FWNFTJK","content_type":"text/html","attempt":1,"fetch_method":"playwright"}
+```
+
+hmm still having problems with that url but seeing no errors, here is what was inserted as the raw_json:
+```
+{"source_store":"whole_foods","source_url":"https://www.wholefoodsmarket.com/365-everyday-value-organic-tortillas/dp/B07FWNFTJK","fetched_at":"2026-03-15T23:41:40+00:00","fetch_status":"ok","http_status":200,"error":null,"extracted":{"name":"Oops!","brand":null,"category":null,"organic_flag":0,"ingredient_text":null,"nutrition":{}},"final_url":"https://www.wholefoodsmarket.com/365-everyday-value-organic-tortillas/dp/B07FWNFTJK","content_type":"text/html","attempt":1,"fetch_method":"playwright"}
+```
+
+wait, I realized the root cause of this problem. We are visiting the canonicalized url like https://www.wholefoodsmarket.com/365-Everyday-Value-Organic-Tortillas/dp/B07FWNFTJK . But when I go to this in my browser, it's a page like "Oops! This page was not found". Only when I go to a product detail page with the extra params, like in @test_grocery_pipeline.py , does the page actually work in the browser. Idk how our @test_wholefoods_scraper.py:23 test is succeeding, but clearly when we actually run on a product url, we are hitting this problem
+
+ok, now I see this getting inserted as the raw json:
+```
+{"source_store":"whole_foods","source_url":"https://www.wholefoodsmarket.com/365-everyday-value-organic-tortillas/dp/B07FWNFTJK?pd_rd_w=Z92ht&content-id=amzn1.sym.e3bf0c38-07bb-437c-a078-90549ca755f6&pf_rd_p=1e00dde6-7b7a-457f-8a8b-81fdf1e27aae&pf_rd_r=8PHDB389QHJE9FXE2W3P&pd_rd_wg=VVEE7&pd_rd_r=31aae73e-0daf-4e86-a905-9a8719d98df3&pd_rd_i=B07FWNFTJK&fpw=alm&almBrandId=VUZHIFdob2xlIEZvb2Rz&ref_=pd_alm_wf_dsk_cp_wf_merch_WF21586_sg_1_2_t","fetched_at":"2026-03-15T23:47:29+00:00","fetch_status":"store_gate","http_status":200,"error":"store_selection_required","extracted":{},"final_url":"https://www.wholefoodsmarket.com/365-everyday-value-organic-tortillas/dp/B07FWNFTJK?pd_rd_w=Z92ht&content-id=amzn1.sym.e3bf0c38-07bb-437c-a078-90549ca755f6&pf_rd_p=1e00dde6-7b7a-457f-8a8b-81fdf1e27aae&pf_rd_r=8PHDB389QHJE9FXE2W3P&pd_rd_wg=VVEE7&pd_rd_r=31aae73e-0daf-4e86-a905-9a8719d98df3&pd_rd_i=B07FWNFTJK&fpw=alm&almBrandId=VUZHIFdob2xlIEZvb2Rz&ref_=pd_alm_wf_dsk_cp_wf_merch_WF21586_sg_1_2_t","content_type":"text/html","attempt":1,"fetch_method":"playwright","canonical_source_url":"https://www.wholefoodsmarket.com/365-everyday-value-organic-tortillas/dp/B07FWNFTJK"}
+```
+It's an improvement, but still looks like we werent able to get any actual nutrition data from the page? Let's try to run some manual tests from the cmd line on the url in @test_urls.txt and see if we can figure out whats going on
+
+those tests were useless since they didnt reflect actual issues in our app. I removed them. Let's go ahead and implement the fix directly to make this work.
+
+I'm trying to do some simple web scraping to add products to the db given a url @wholefoods_scraper.py . But as you can see, we are doing some complicated logic to deal with whole foods' gating on selecting a location or signing into a profile. They use some url suffixes as part of this, for instance this link works in my chrome browser: https://www.wholefoodsmarket.com/365-everyday-value-organic-tortillas/dp/B07FWNFTJK?pd_rd_w=Z92ht&content-id=amzn1.sym.e3bf0c38-07bb-437c-a078-90549ca755f6&pf_rd_p=1e00dde6-7b7a-457f-8a8b-81fdf1e27aae&pf_rd_r=8PHDB389QHJE9FXE2W3P&pd_rd_wg=VVEE7&pd_rd_r=31aae73e-0daf-4e86-a905-9a8719d98df3&pd_rd_i=B07FWNFTJK&fpw=alm&almBrandId=VUZHIFdob2xlIEZvb2Rz&ref_=pd_alm_wf_dsk_cp_wf_merch_WF21586_sg_1_2_t , but this one says page not found https://www.wholefoodsmarket.com/365-everyday-value-organic-tortillas/dp/B07FWNFTJK . The reason I was choosing whole foods was that they have the nutrition facts and ingredients on their product detail pages. But with all the issues we're running into, I want to see how we can simplify things. Consider the following options:
+- Switch from whole foods to another site
+- Require greater manual interaction, like the user logging in on the browser
+- Some other workaround that would simplify our whole foods fetching
+
+The primary feature that I want to support is providing a product url to add to the db.
+
+ok, that sounds good, but before we do that, let's run some quick tests from the command line or small python scripts to test open food facts and make sure it will actually work and get the nutrition info we need
+
+We need to switch off of whole foods @wholefoods_scraper.py , clean up all our scraping code, and instead just use the USDA FoodData Central API. I have defined USDA_API_KEY in my .env. Let's make a concise, high-level plan for this.
