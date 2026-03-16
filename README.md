@@ -116,22 +116,13 @@ Below are the main tables and key columns in the Grocery Store DB SQLite databas
   ```
   USDA_API_KEY=your_key_here
   ```
-  Get a free key at [https://fdc.nal.usda.gov/api-key-signup.html](https://fdc.nal.usda.gov/api-key-signup.html)
+  Get a free API key [here](https://fdc.nal.usda.gov/api-key-signup)
 - Initialize the DB schema: `python grocery_db.py init --seed-default-flags`
 - Run the interactive CLI: `python grocery_db.py`
 - Type `help` to see all available commands.
 
-## USDA Import
-
-Import products from the USDA FoodData Central API by search query. Can be run directly (not just via the interactive CLI).
-
-```bash
-python grocery_db.py usda-import --query "organic yogurt" --max-results 50
-python grocery_db.py usda-import --query "almond butter" --query "peanut butter" --max-results 100
-```
-
-## CRUD Operations
-All operations below are run inside the interactive CLI (`python grocery_db.py`).
+## CLI Tool Usage
+All operations below are run inside the interactive CLI (after running `python grocery_db.py`).
 
 ### Insert a product
 `insert --name "Product Name" --brand "Brand Name" --category "Category Name"`
@@ -144,3 +135,6 @@ All operations below are run inside the interactive CLI (`python grocery_db.py`)
 
 ### Query healthy products
 `query-healthy --limit <number of products to show>`
+
+### Import products from USDA FoodCentral API
+`usda-import --query <search query> --max-results <number>`
