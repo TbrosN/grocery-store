@@ -612,7 +612,7 @@ def build_cli() -> argparse.ArgumentParser:
 
     update_parser = sub.add_parser("update", help="Update an existing product")
     update_parser.add_argument("--id", type=int, required=True, dest="id", help="Product id")
-    update_parser.add_argument("--name", default=None, help="New product name")
+    update_parser.add_argument("--name", required=True, default=None, help="New product name")
     update_parser.add_argument("--brand", default=None, help="New brand")
     update_parser.add_argument("--category", default=None, help="New category")
     update_parser.set_defaults(func=_cmd_update)
@@ -676,7 +676,11 @@ def _run_interactive_loop(parser: argparse.ArgumentParser, db_path: str) -> None
             if parsed.command in ("quit", "exit"):
                 _cmd_quit(parsed, conn)
                 return
-            parsed.func(parsed, conn)
+            try:
+                parsed.func(parsed, conn)
+            except Exception as e:
+                print(f"[ERROR] {e}")
+                continue
             # Commit after each modifying command (read-only commands are no-op)
             if parsed.command not in ("query-healthy", "query-products"):
                 conn.commit()
