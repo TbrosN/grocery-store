@@ -401,6 +401,19 @@ def _cmd_seed_flags(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
     print(f"Seeded ingredient flags: {args.db}")
 
 
+def _cmd_query_products(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        "SELECT * FROM products ORDER BY id ASC LIMIT ?",
+        (args.limit,),
+    ).fetchall()
+    for row in rows:
+        organic = "organic" if row["organic_flag"] else "non-organic"
+        print(
+            f"[{row['id']}] {row['name']} | {row['brand'] or '-'} | "
+            f"{row['category'] or '-'} | {organic} | ingredients={row['ingredient_count']}"
+        )
+
+
 def _cmd_query_healthy(args: argparse.Namespace, conn: sqlite3.Connection) -> None:
     rows = query_healthy_products(conn, limit=args.limit)
     for row in rows:
@@ -575,6 +588,18 @@ def build_cli() -> argparse.ArgumentParser:
     query_parser.add_argument("--limit", type=int, default=25, help="Max rows to show")
     query_parser.set_defaults(func=_cmd_query_healthy)
 
+    query_products_parser = sub.add_parser(
+        "query-all",
+        help="List all products (SELECT * FROM products ORDER BY id ASC)",
+    )
+    query_products_parser.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        help="Max rows to show (default: 10)",
+    )
+    query_products_parser.set_defaults(func=_cmd_query_products)
+
     insert_parser = sub.add_parser("insert", help="Insert a new product")
     insert_parser.add_argument("--name", required=True, help="Product name")
     insert_parser.add_argument("--brand", default=None, help="Brand")
@@ -653,7 +678,7 @@ def _run_interactive_loop(parser: argparse.ArgumentParser, db_path: str) -> None
                 return
             parsed.func(parsed, conn)
             # Commit after each modifying command (read-only commands are no-op)
-            if parsed.command != "query-healthy":
+            if parsed.command not in ("query-healthy", "query-products"):
                 conn.commit()
     finally:
         conn.close()

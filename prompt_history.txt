@@ -498,3 +498,7 @@ The primary feature that I want to support is providing a product url to add to 
 ok, that sounds good, but before we do that, let's run some quick tests from the command line or small python scripts to test open food facts and make sure it will actually work and get the nutrition info we need
 
 We need to switch off of whole foods @wholefoods_scraper.py , clean up all our scraping code, and instead just use the USDA FoodData Central API. I have defined USDA_API_KEY in my .env. Let's make a concise, high-level plan for this.
+
+@grocery_db.py:588-626 let's add a query-products command that just does a select * on the products table, orders by id asc, and takes an optional limit arg that defaults to 10
+
+great, but let's pretty print the output like we do for query-healthy
